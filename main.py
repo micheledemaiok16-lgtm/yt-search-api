@@ -7,7 +7,6 @@ app = Flask(__name__)
 
 
 def normalize(text):
-    """Rimuove accenti, punteggiatura e lowercase per confronto."""
     text = text.lower().strip()
     text = re.sub(r'[^\w\s]', '', text)
     text = re.sub(r'\s+', ' ', text)
@@ -15,22 +14,20 @@ def normalize(text):
 
 
 def match_score(title, artist, song):
-    """Calcola quanto un titolo corrisponde ad artista e canzone."""
     title_norm = normalize(title)
     artist_norm = normalize(artist)
     song_norm = normalize(song)
-
     score = 0
 
-    # Controlla se l'artista è nel titolo
     artist_words = artist_norm.split()
-    artist_matches = sum(1 for w in artist_words if w in title_norm)
-    score += (artist_matches / len(artist_words)) * 50 if artist_words else 0
+    if artist_words:
+        artist_matches = sum(1 for w in artist_words if w in title_norm)
+        score += (artist_matches / len(artist_words)) * 50
 
-    # Controlla se il nome della canzone è nel titolo
     song_words = song_norm.split()
-    song_matches = sum(1 for w in song_words if w in title_norm)
-    score += (song_matches / len(song_words)) * 50 if song_words else 0
+    if song_words:
+        song_matches = sum(1 for w in song_words if w in title_norm)
+        score += (song_matches / len(song_words)) * 50
 
     return score
 
@@ -44,40 +41,58 @@ def health():
 def search_youtube():
     try:
         data = request.json
-        query = data.get('query')
-        artist = data.get('artist', '')
-        song = data.get('song', '')
-        max_results = data.get('max_results', 5)
+        artist = data.get('artist', '').strip()
+        song = data.get('song', '').strip()
+        query = data.get('query', '').strip()
+        max_results = data.get('max_results', 3)
 
         if not query and not (artist and song):
             return jsonify({"error": "query or artist+song required"}), 400
 
-        if not query:
-            query = f'{artist} {song}'
+        if not artist and not song and query:
+            parts = query.split(' - ', 1)
+            artist = parts[0].strip() if len(parts) > 1 else ''
+            song = parts[-1].strip()
 
-        search_query = f'{query} youtube music video'
+        # Prova diverse query in ordine di precisione
+        search_queries = [
+            f'"{artist}" "{song}" youtube',
+            f'{artist} - {song}',
+            f'{artist} {song}',
+        ]
 
-        results = DDGS().videos(
-            query=search_query,
-            region="wt-wt",
-            safesearch="off",
-            max_results=max_results * 3
-        )
+        best_videos = []
 
-        videos = []
-        for video in results:
-            content_url = video.get("content", "")
-            if "youtube.com" in content_url or "youtu.be" in content_url:
+        for sq in search_queries:
+            try:
+                results = DDGS().videos(
+                    query=sq,
+                    region="wt-wt",
+                    safesearch="off",
+                    max_results=10
+                )
+            except Exception:
+                continue
+
+            for video in results:
+                content_url = video.get("content", "")
+                if "youtube.com" not in content_url and "youtu.be" not in content_url:
+                    continue
+
                 video_id = ""
                 if "watch?v=" in content_url:
                     video_id = content_url.split("watch?v=")[1].split("&")[0]
                 elif "youtu.be/" in content_url:
                     video_id = content_url.split("youtu.be/")[1].split("?")[0]
 
-                title = video.get("title", "")
-                score = match_score(title, artist or query.split(' - ')[0], song or query.split(' - ')[-1])
+                # Evita duplicati
+                if any(v['id'] == video_id for v in best_videos):
+                    continue
 
-                videos.append({
+                title = video.get("title", "")
+                score = match_score(title, artist, song)
+
+                best_videos.append({
                     "id": video_id,
                     "title": title,
                     "channel": video.get("uploader", ""),
@@ -88,16 +103,18 @@ def search_youtube():
                     "match_score": round(score, 1)
                 })
 
-        # Ordina per match_score decrescente
-        videos.sort(key=lambda x: x['match_score'], reverse=True)
+            # Se troviamo un match con score >= 80, non servono altre query
+            if any(v['match_score'] >= 80 for v in best_videos):
+                break
 
-        # Restituisci solo i migliori risultati
-        videos = videos[:max_results]
+        best_videos.sort(key=lambda x: x['match_score'], reverse=True)
+        best_videos = best_videos[:max_results]
 
         return jsonify({
             "success": True,
-            "query": search_query,
-            "results": videos
+            "artist": artist,
+            "song": song,
+            "results": best_videos
         })
 
     except Exception as e:
