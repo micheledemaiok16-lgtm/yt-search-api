@@ -1,6 +1,5 @@
 from flask import Flask, request, jsonify
-import subprocess
-import json
+from duckduckgo_search import DDGS
 import os
 
 app = Flask(__name__)
@@ -21,36 +20,33 @@ def search_youtube():
         if not query:
             return jsonify({"error": "query required"}), 400
 
-        cmd = [
-            'yt-dlp',
-            f'ytsearch{max_results}:{query}',
-            '--dump-json',
-            '--no-download',
-            '--no-warnings',
-            '--ignore-errors'
-        ]
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-
-        if result.returncode != 0 and not result.stdout:
-            return jsonify({"error": "Search failed", "stderr": result.stderr, "returncode": result.returncode}), 500
+        results = DDGS().videos(
+            keywords=query,
+            region="wt-wt",
+            safesearch="off",
+            max_results=max_results
+        )
 
         videos = []
-        for line in result.stdout.strip().split('\n'):
-            if line:
-                try:
-                    video = json.loads(line)
-                    videos.append({
-                        "id": video.get("id"),
-                        "title": video.get("title"),
-                        "channel": video.get("channel"),
-                        "duration": video.get("duration"),
-                        "view_count": video.get("view_count"),
-                        "url": f"https://www.youtube.com/watch?v={video.get('id')}",
-                        "thumbnail": video.get("thumbnail")
-                    })
-                except json.JSONDecodeError:
-                    continue
+        for video in results:
+            content_url = video.get("content", "")
+            # Filtra solo risultati YouTube
+            if "youtube.com" in content_url or "youtu.be" in content_url:
+                video_id = ""
+                if "watch?v=" in content_url:
+                    video_id = content_url.split("watch?v=")[1].split("&")[0]
+                elif "youtu.be/" in content_url:
+                    video_id = content_url.split("youtu.be/")[1].split("?")[0]
+
+                videos.append({
+                    "id": video_id,
+                    "title": video.get("title", ""),
+                    "channel": video.get("uploader", ""),
+                    "duration": video.get("duration", ""),
+                    "view_count": video.get("statistics", {}).get("viewCount"),
+                    "url": content_url,
+                    "thumbnail": video.get("images", {}).get("large", "")
+                })
 
         return jsonify({
             "success": True,
@@ -58,8 +54,6 @@ def search_youtube():
             "results": videos
         })
 
-    except subprocess.TimeoutExpired:
-        return jsonify({"error": "Search timeout"}), 504
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -68,35 +62,32 @@ def search_youtube():
 def video_info():
     try:
         data = request.json
-        url = data.get('url')
+        query = data.get('query') or data.get('url')
 
-        if not url:
-            return jsonify({"error": "url required"}), 400
+        if not query:
+            return jsonify({"error": "query or url required"}), 400
 
-        cmd = [
-            'yt-dlp',
-            url,
-            '--dump-json',
-            '--no-download',
-            '--no-warnings'
-        ]
+        results = DDGS().videos(
+            keywords=query,
+            region="wt-wt",
+            safesearch="off",
+            max_results=1
+        )
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if not results:
+            return jsonify({"error": "No results found"}), 404
 
-        if result.returncode != 0:
-            return jsonify({"error": "Failed to get video info"}), 500
-
-        video = json.loads(result.stdout)
+        video = results[0]
 
         return jsonify({
             "success": True,
             "video": {
-                "id": video.get("id"),
-                "title": video.get("title"),
-                "channel": video.get("channel"),
-                "duration": video.get("duration"),
-                "view_count": video.get("view_count"),
-                "upload_date": video.get("upload_date"),
+                "id": video.get("content", "").split("watch?v=")[-1].split("&")[0] if "watch?v=" in video.get("content", "") else "",
+                "title": video.get("title", ""),
+                "channel": video.get("uploader", ""),
+                "duration": video.get("duration", ""),
+                "view_count": video.get("statistics", {}).get("viewCount"),
+                "published": video.get("published", ""),
                 "description": video.get("description", "")[:500]
             }
         })
