@@ -33,7 +33,7 @@ def search_youtube():
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
         if result.returncode != 0 and not result.stdout:
-            return jsonify({"error": "Search failed", "details": result.stderr}), 500
+            return jsonify({"error": "Search failed", "stderr": result.stderr, "returncode": result.returncode}), 500
 
         videos = []
         for line in result.stdout.strip().split('\n'):
